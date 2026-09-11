@@ -1,0 +1,1 @@
+export type Role='SUPER_ADMIN'|'MANAGER'|'EMPLOYEE'; export type State='NOT_STARTED'|'WORKING'|'ON_BREAK'|'COMPLETED';

@@ -1,0 +1,2 @@
+import type {ReactNode} from 'react';
+export default function Card({title,value,children}:{title:string,value?:string|number,children?:ReactNode}){return <section className="card"><span>{title}</span><strong>{value}</strong>{children}</section>}
