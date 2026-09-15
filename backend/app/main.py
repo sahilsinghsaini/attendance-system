@@ -17,6 +17,16 @@ app.add_middleware(SecurityHeaders)
 app.state.limiter=limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in settings.cors_origins.split(",") if x.strip()],allow_credentials=True,allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],allow_headers=["Authorization","Content-Type","Idempotency-Key"])
+from fastapi.responses import RedirectResponse, Response
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
 @app.get("/health")
 def health(): return {"status":"ok"}
 app.include_router(auth.router);app.include_router(attendance.router);app.include_router(wfh.router);app.include_router(manager.router);app.include_router(admin.router);app.include_router(offices.router);app.include_router(schedule.router)

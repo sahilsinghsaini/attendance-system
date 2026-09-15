@@ -1,27 +1,69 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logging.config import fileConfig
-from sqlalchemy import create_engine,pool
+
 from alembic import context
+from sqlalchemy import create_engine, pool
+
+from app.core.config import settings
 from app.db.base import Base
 import app.models
-config=context.config
-if config.config_file_name:
-    pass
-target_metadata=Base.metadata
+
+config = context.config
+
+target_metadata = Base.metadata
+
+
+def get_database_url():
+    url = settings.database_url
+
+    # Alembic/SQLAlchemy needs the psycopg driver used by this project.
+    if url.startswith("postgresql://"):
+        url = url.replace(
+            "postgresql://",
+            "postgresql+psycopg://",
+            1,
+        )
+
+    return url
+
+
 def run_migrations_offline():
-    context.configure(url=config.get_main_option("sqlalchemy.url"),target_metadata=target_metadata,literal_binds=True,compare_type=True)
-    with context.begin_transaction(): context.run_migrations()
+    url = get_database_url()
+
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=True,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online():
-    url=config.get_main_option("sqlalchemy.url")
-    connectable=create_engine(url,poolclass=pool.NullPool)
+    url = get_database_url()
+
+    connectable = create_engine(
+        url,
+        poolclass=pool.NullPool,
+    )
 
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            compare_type=True
+            compare_type=True,
         )
 
         with context.begin_transaction():
             context.run_migrations()
-if context.is_offline_mode(): run_migrations_offline()
-else: run_migrations_online()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()

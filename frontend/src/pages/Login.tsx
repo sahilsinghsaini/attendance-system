@@ -37,8 +37,19 @@ export default function Login() {
       } else {
         nav('/employee/dashboard');
       }
-    } catch (e) {
-      setError('Login failed');
+    } catch (e: any) {
+      try {
+        const parsed = JSON.parse(e.message);
+        if (parsed.detail === 'Account is not active') {
+          setError('Your account is registered but pending approval by a manager or administrator.');
+        } else if (parsed.detail === 'Invalid credentials') {
+          setError('Invalid email or password.');
+        } else {
+          setError(parsed.detail || 'Login failed.');
+        }
+      } catch {
+        setError(e.message || 'Login failed.');
+      }
     }
   }
 
