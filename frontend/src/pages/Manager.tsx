@@ -3,7 +3,105 @@ import Card from '../components/Card';
 import WorkHours from '../components/WorkHours';
 import {api} from '../services/api';
 
-const TABS=['Overview','Registrations','WFH Requests','Team','Work Hours'] as const;
+function parseTimestamp(value: any) {
+  if (!value) return null;
+  const text = String(value);
+  if (!text.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(text)) {
+    return new Date(text + 'Z');
+  }
+  return new Date(text);
+}
+
+function formatOfficeTime(
+  value: string | null | undefined,
+  timeZone: string | null | undefined,
+  options: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit' }
+) {
+  if (!value) return '—';
+  const d = parseTimestamp(value);
+  if (!d || Number.isNaN(d.getTime())) return '—';
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      ...options,
+      timeZone: timeZone || 'UTC'
+    }).format(d);
+  } catch {
+    return new Intl.DateTimeFormat(undefined, options).format(d);
+  }
+}
+
+function getTimeZoneOffsetMs(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+
+  const values: Record<string, number> = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') values[part.type] = Number(part.value);
+  }
+
+  const asUtc = Date.UTC(
+    values.year,
+    values.month - 1,
+    values.day,
+    values.hour,
+    values.minute,
+    values.second
+  );
+  return asUtc - date.getTime();
+}
+
+function officeLocalInputToUtc(
+  value: string,
+  timeZone: string | null | undefined
+) {
+  if (!value) return '';
+  const tz = timeZone || 'UTC';
+  const [datePart, timePart] = value.split('T');
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hour, minute] = timePart.split(':').map(Number);
+
+  // Interpret the datetime-local wall clock as UTC first, then remove the
+  // office's actual UTC offset. Re-check once so DST transitions are handled.
+  const wallMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let utcMs = wallMs - getTimeZoneOffsetMs(new Date(wallMs), tz);
+  const corrected = wallMs - getTimeZoneOffsetMs(new Date(utcMs), tz);
+
+  if (corrected !== utcMs) utcMs = corrected;
+  return new Date(utcMs).toISOString();
+}
+
+function toOfficeLocalInputValue(
+  iso: string | null | undefined,
+  timeZone: string | null | undefined
+) {
+  if (!iso) return '';
+  const d = parseTimestamp(iso);
+  if (!d || Number.isNaN(d.getTime())) return '';
+  const tz = timeZone || 'UTC';
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(d);
+
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
+
+const TABS=['Overview','Registrations','WFH Requests','Team','Monthly Records','Work Hours'] as const;
 type Tab=typeof TABS[number];
 
 export default function Manager(){
@@ -36,6 +134,7 @@ export default function Manager(){
     {tab==='Registrations'&&<Registrations/>}
     {tab==='WFH Requests'&&<WfhRequests/>}
     {tab==='Team'&&<Team/>}
+    {tab==='Monthly Records'&&<MonthlyRecords/>}
     {tab==='Work Hours'&&<WorkHours scope="manager"/>}
   </>;
 }
@@ -48,6 +147,7 @@ function Overview() {
   const [weeklyAttendance, setWeeklyAttendance] = useState<any[]>([]);
   const [office, setOffice] = useState('');
   const [confirmOut, setConfirmOut] = useState(false);
+  const [editingSession, setEditingSession] = useState<any>(null);
   const [, setTick] = useState(0);
 
 useEffect(() => {
@@ -111,22 +211,7 @@ useEffect(() => {
   }
 
   const state = attendance?.state || 'NOT_STARTED';
-  function parseTimestamp(value: any) {
-  if (!value) return null;
-
-  const text = String(value);
-
-  if (
-    !text.endsWith('Z') &&
-    !/[+-]\d{2}:\d{2}$/.test(text)
-  ) {
-    return new Date(text + 'Z');
-  }
-
-  return new Date(text);
-}
-
-function activeBreakSeconds(session: any) {
+  function activeBreakSeconds(session: any) {
   if (!session?.active_break_start_at) return 0;
 
   const start = parseTimestamp(session.active_break_start_at);
@@ -385,34 +470,28 @@ const totalTeam = Math.max(
 
                 <td>
                   {employee.punch_in_at
-                    ? new Date(
-                        employee.punch_in_at
-                      ).toLocaleTimeString([], {
-                        hour: 'numeric',
-                        minute: '2-digit'
-                      })
+                    ? formatOfficeTime(employee.punch_in_at, employee.office_timezone, {
+                      hour: 'numeric',
+                      minute: '2-digit'
+                    })
                     : '—'}
                 </td>
 
                 <td>
                   {employee.scheduled_start
-                    ? new Date(
-                        employee.scheduled_start
-                      ).toLocaleTimeString([], {
-                        hour: 'numeric',
-                        minute: '2-digit'
-                      })
+                    ? formatOfficeTime(employee.scheduled_start, employee.office_timezone, {
+                      hour: 'numeric',
+                      minute: '2-digit'
+                    })
                     : '—'}
                 </td>
 
                 <td>
                   {employee.adjusted_scheduled_end
-                    ? new Date(
-                        employee.adjusted_scheduled_end
-                      ).toLocaleTimeString([], {
-                        hour: 'numeric',
-                        minute: '2-digit'
-                      })
+                    ? formatOfficeTime(employee.adjusted_scheduled_end, employee.office_timezone, {
+                      hour: 'numeric',
+                      minute: '2-digit'
+                    })
                     : '—'}
                 </td>
               </tr>
@@ -604,6 +683,7 @@ const totalTeam = Math.max(
                   <th>Break</th>
                   <th>Worked</th>
                   <th>Office</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
 
@@ -611,6 +691,7 @@ const totalTeam = Math.max(
                 {teamAttendance.map((employee) => (
                   <tr
                     key={employee.employee_id}
+                    className="attendance-row"
                     style={{
                       borderTop: '1px solid #e5e8ee'
                     }}
@@ -677,6 +758,21 @@ const totalTeam = Math.max(
                     <td>
                       {employee.office || '—'}
                     </td>
+
+                    <td>
+                      {employee.session_id ? (
+                        <button
+                          className="edit-attendance-btn"
+                          onClick={() => setEditingSession(employee)}
+                        >
+                          Edit
+                        </button>
+                      ) : (
+                        <span style={{ color: '#9aa4b2', fontSize: 13 }}>
+                          No session
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -684,6 +780,19 @@ const totalTeam = Math.max(
           </div>
         )}
       </section>
+
+      {editingSession && (
+        <AttendanceEditModal
+          session={editingSession}
+          onClose={() => setEditingSession(null)}
+          onSaved={() => {
+            setEditingSession(null);
+            api('/manager/attendance/today')
+              .then(setTeamAttendance)
+              .catch(() => {});
+          }}
+        />
+      )}
 
       {confirmOut && (
         <div
@@ -745,6 +854,150 @@ const totalTeam = Math.max(
       )}
     </>
   );
+}
+
+function MonthlyRecords(){
+  const now = new Date();
+  const [team,setTeam]=useState<any[]>([]);
+  const [employeeId,setEmployeeId]=useState<string>('');
+  const [year,setYear]=useState(now.getFullYear());
+  const [month,setMonth]=useState(now.getMonth()+1);
+  const [records,setRecords]=useState<any[]>([]);
+  const [expanded,setExpanded]=useState<string|null>(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState('');
+
+  useEffect(()=>{
+    api('/manager/employees').then(setTeam).catch(()=>{});
+  },[]);
+
+  function load(){
+    setLoading(true);
+    setError('');
+    const q = new URLSearchParams({year:String(year),month:String(month)});
+    if(employeeId) q.set('employee_id',employeeId);
+    api('/manager/attendance/monthly?'+q.toString())
+      .then((data)=>{setRecords(data); setLoading(false);})
+      .catch((e)=>{setError(e?.message||'Failed to load monthly records'); setLoading(false);});
+  }
+
+  useEffect(load,[year,month,employeeId]);
+
+  const monthLabel = new Date(year,month-1,1).toLocaleString('default',{month:'long',year:'numeric'});
+
+  return <section className="card hero monthly-records">
+    <h3>Monthly attendance records</h3>
+    <p className="manager-subtitle">
+      Browse each employee's attendance history month by month — always available whenever you need it.
+    </p>
+
+    <div className="monthly-records-controls">
+      <select value={employeeId} onChange={e=>setEmployeeId(e.target.value)}>
+        <option value="">All employees</option>
+        {team.map(e=><option key={e.id} value={e.id}>{e.full_name}</option>)}
+      </select>
+
+      <select value={month} onChange={e=>setMonth(Number(e.target.value))}>
+        {Array.from({length:12}).map((_,i)=>
+          <option key={i+1} value={i+1}>
+            {new Date(2000,i,1).toLocaleString('default',{month:'long'})}
+          </option>
+        )}
+      </select>
+
+      <select value={year} onChange={e=>setYear(Number(e.target.value))}>
+        {Array.from({length:5}).map((_,i)=>{
+          const y = now.getFullYear()-3+i;
+          return <option key={y} value={y}>{y}</option>;
+        })}
+      </select>
+
+      <button onClick={load} disabled={loading}>{loading?'Loading…':'Refresh'}</button>
+    </div>
+
+    {error && (
+      <div className="monthly-records-error">
+        <span>⚠️ {error}</span>
+        <button onClick={load}>Retry</button>
+      </div>
+    )}
+
+    {loading && (
+      <div className="monthly-records-grid">
+        {[0,1,2].map(i=>(
+          <div className="monthly-record-card skeleton-card" key={i}>
+            <div className="skeleton-line" style={{width:'40%'}}/>
+            <div className="skeleton-line" style={{width:'70%'}}/>
+          </div>
+        ))}
+      </div>
+    )}
+
+    {!loading && !error && records.length===0 && (
+      <div className="monthly-records-empty">
+        <div className="monthly-records-empty-icon">🗂️</div>
+        <p>No records found for {monthLabel}.</p>
+      </div>
+    )}
+
+    {!loading && !error && records.length>0 && (
+      <div className="monthly-records-grid">
+        {records.map(r=>{
+          const hasAnyAttendance = r.days.some((d:any)=>d.session_id);
+          return (
+            <div className="monthly-record-card" key={r.employee_id}>
+              <div className="monthly-record-head" onClick={()=>setExpanded(expanded===r.employee_id?null:r.employee_id)}>
+                <div>
+                  <h4>{r.employee_name}</h4>
+                  <span className="monthly-record-sub">{r.employee_code} · {monthLabel}</span>
+                </div>
+                <div className="monthly-record-stats">
+                  <div><b>{r.present_days}</b><span>Present</span></div>
+                  <div><b>{r.late_days}</b><span>Late</span></div>
+                  <div><b>{Math.round(r.total_worked_minutes/60)}h</b><span>Worked</span></div>
+                  {r.edited_days>0 && <div><b>{r.edited_days}</b><span>Edited</span></div>}
+                </div>
+                <span className="monthly-record-chevron">{expanded===r.employee_id?'▲':'▼'}</span>
+              </div>
+
+              {expanded===r.employee_id && (
+                hasAnyAttendance ? (
+                  <div className="monthly-record-table-wrap">
+                    <table className="monthly-record-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th><th>Status</th><th>Punch In</th><th>Punch Out</th>
+                          <th>Break</th><th>Worked</th><th>Late</th><th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {r.days.map((d:any)=>(
+                          <tr key={d.date} className={d.was_edited?'was-edited':''}>
+                            <td data-label="Date">{d.date}</td>
+                            <td data-label="Status">{d.state}</td>
+                            <td data-label="Punch In">{d.punch_in_at ? formatOfficeTime(d.punch_in_at, d.office_timezone) : '—'}</td>
+                            <td data-label="Punch Out">{d.punch_out_at ? formatOfficeTime(d.punch_out_at, d.office_timezone) : '—'}</td>
+                            <td data-label="Break">{d.break_minutes}m</td>
+                            <td data-label="Worked">{d.worked_minutes}m</td>
+                            <td data-label="Late">{d.late_minutes>0 ? `${d.late_minutes}m` : '—'}</td>
+                            <td data-label="">{d.was_edited && <span className="edited-badge" title="Edited by manager">Edited</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="monthly-record-empty-month">
+                    No attendance records for this month.
+                  </div>
+                )
+              )}
+            </div>
+          );
+        })}
+      </div>
+    )}
+  </section>;
 }
 
 function Registrations(){
@@ -1072,4 +1325,171 @@ setEditProfile({...profile});
   </section>
 )}
   </section>;
+}
+function AttendanceEditModal({
+  session,
+  onClose,
+  onSaved
+}: {
+  session: any;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [punchIn, setPunchIn] = useState(toOfficeLocalInputValue(session.punch_in_at, session.office_timezone));
+  const [punchOut, setPunchOut] = useState(toOfficeLocalInputValue(session.punch_out_at, session.office_timezone));
+  const [breakMinutes, setBreakMinutes] = useState(
+    String(session.break_minutes_raw ?? session.break_minutes ?? 0)
+  );
+  const [state, setState] = useState(session.state || 'WORKING');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [history, setHistory] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const loadHistory = () => {
+    api('/manager/attendance/' + session.session_id + '/history')
+      .then(setHistory)
+      .catch(() => setHistory([]));
+    setShowHistory(true);
+  };
+
+  const save = async () => {
+    if (reason.trim().length < 3) {
+      setError('Please enter a reason (at least 3 characters) for this correction.');
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+
+    try {
+      const body: any = { reason: reason.trim() };
+
+      if (punchIn) body.punch_in_at = officeLocalInputToUtc(punchIn, session.office_timezone);
+      if (punchOut) body.punch_out_at = officeLocalInputToUtc(punchOut, session.office_timezone);
+      if (state) body.state = state;
+      if (breakMinutes !== '') body.break_minutes = Number(breakMinutes);
+
+      await api('/manager/attendance/' + session.session_id, {
+        method: 'PUT',
+        body: JSON.stringify(body)
+      });
+
+      onSaved();
+    } catch (e: any) {
+      setError(
+        (e && e.message) ||
+          'Could not save this correction. Please check the values and try again.'
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-panel attendance-edit-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 style={{ marginTop: 0 }}>Correct attendance</h3>
+        <p className="manager-subtitle" style={{ marginTop: -6 }}>
+          {session.employee_name} • {session.employee_code}
+        </p>
+        <p className="manager-subtitle" style={{ marginTop: -4 }}>
+          Times are shown in the employee's office timezone: <b>{session.office_timezone || 'UTC'}</b>
+        </p>
+
+        <div className="edit-grid">
+          <label>
+            Punch in
+            <input
+              type="datetime-local"
+              value={punchIn}
+              onChange={(e) => setPunchIn(e.target.value)}
+            />
+          </label>
+
+          <label>
+            Punch out
+            <input
+              type="datetime-local"
+              value={punchOut}
+              onChange={(e) => setPunchOut(e.target.value)}
+            />
+          </label>
+
+          <label>
+            Break (minutes)
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={breakMinutes}
+              onChange={(e) => setBreakMinutes(e.target.value)}
+            />
+          </label>
+
+          <label>
+            Status
+            <select value={state} onChange={(e) => setState(e.target.value)}>
+              <option value="NOT_STARTED">Not started</option>
+              <option value="WORKING">Working</option>
+              <option value="ON_BREAK">On break</option>
+              <option value="COMPLETED">Completed</option>
+            </select>
+          </label>
+        </div>
+
+        <label style={{ display: 'block', marginTop: 14 }}>
+          Reason for correction <span style={{ color: '#e05252' }}>*</span>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. Employee's app failed to register punch-in; confirmed arrival at 9:05 AM via office badge log."
+            rows={3}
+            style={{ width: '100%', marginTop: 6, resize: 'vertical' }}
+          />
+        </label>
+
+        {error && (
+          <p style={{ color: '#e05252', marginBottom: 0 }}>{error}</p>
+        )}
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 18, flexWrap: 'wrap' }}>
+          <button onClick={save} disabled={saving} className="primary-btn">
+            {saving ? 'Saving…' : 'Save correction'}
+          </button>
+          <button onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            onClick={loadHistory}
+            disabled={saving}
+            style={{ marginLeft: 'auto' }}
+          >
+            View edit history
+          </button>
+        </div>
+
+        {showHistory && (
+          <div className="edit-history">
+            {history.length === 0 ? (
+              <p style={{ fontSize: 13, color: '#7a8494' }}>
+                No prior corrections for this session.
+              </p>
+            ) : (
+              history.map((h) => (
+                <div key={h.id} className="edit-history-item">
+                  <small>{new Date(h.created_at).toLocaleString()}</small>
+                  <p style={{ margin: '4px 0' }}>{h.reason}</p>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

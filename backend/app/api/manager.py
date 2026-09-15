@@ -1,4 +1,4 @@
-from fastapi import APIRouter,Depends,HTTPException
+from fastapi import APIRouter,Depends,HTTPException,Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 import uuid
@@ -13,16 +13,33 @@ from datetime import date
 from app.models.work_hours import WorkHoursPolicy
 from app.models.schedule import WorkSchedule
 from app.services.work_hours_service import summary_for
+from app.services.audit_service import audit
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from app.models.attendance import (
     AttendanceSession,
     AttendanceBreak,
-    AttendanceException
+    AttendanceException,
+    AttendanceAdjustment,
+    AttendanceState,
 )
-from app.models.office import Office
 from app.models.office import Office, EmployeeOffice
+
+
+class AttendanceEditIn(BaseModel):
+    punch_in_at: datetime | None = None
+    punch_out_at: datetime | None = None
+    state: AttendanceState | None = None
+    break_minutes: float | None = Field(default=None, ge=0, le=1440)
+    reason: str = Field(min_length=3, max_length=1000)
+
+    @field_validator("punch_in_at", "punch_out_at")
+    @classmethod
+    def _ensure_tz(cls, v):
+        if v is not None and v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v
 PAN_PATTERN = r"^[A-Z]{5}[0-9]{4}[A-Z]$"
 SIN_PATTERN = r"^[0-9]{9}$"
 def validate_pan(value):
@@ -237,26 +254,59 @@ def today_attendance(
     now = datetime.now(timezone.utc)
     out = []
 
-    for e in team:
-
-        session = db.scalar(
+    # A manager's browser timezone must never determine which attendance
+    # record is considered "today".  Candidate sessions are selected by the
+    # employee's office-local calendar date instead.
+    team_ids = [e.id for e in team]
+    candidate_sessions = []
+    if team_ids:
+        utc_today = now.date()
+        candidate_sessions = db.scalars(
             select(AttendanceSession)
             .where(
-                AttendanceSession.employee_id == e.id
+                AttendanceSession.employee_id.in_(team_ids),
+                AttendanceSession.work_date >= utc_today - timedelta(days=1),
+                AttendanceSession.work_date <= utc_today + timedelta(days=1),
             )
             .order_by(
-                AttendanceSession.work_date.desc()
+                AttendanceSession.employee_id,
+                AttendanceSession.work_date.desc(),
+                AttendanceSession.id.desc(),
             )
-        )
+        ).all()
+
+    office_ids = {s.office_id for s in candidate_sessions if s.office_id}
+    offices_by_id = {}
+    if office_ids:
+        for o in db.scalars(
+            select(Office).where(Office.id.in_(office_ids))
+        ).all():
+            offices_by_id[o.id] = o
+
+    sessions_today = {}
+    for candidate in candidate_sessions:
+        office = offices_by_id.get(candidate.office_id) if candidate.office_id else None
+        try:
+            local_tz = ZoneInfo(office.timezone if office else "UTC")
+        except Exception:
+            local_tz = ZoneInfo("UTC")
+        if candidate.work_date == now.astimezone(local_tz).date():
+            sessions_today.setdefault(candidate.employee_id, candidate)
+
+    for e in team:
+
+        session = sessions_today.get(e.id)
 
         if not session:
             out.append({
+                "session_id": None,
                 "employee_id": e.id,
                 "employee_name": e.full_name,
                 "employee_code": e.employee_code,
                 "state": "NOT_STARTED",
                 "mode": None,
                 "office": None,
+                "office_timezone": None,
                 "punch_in_at": None,
                 "punch_out_at": None,
                 "break_minutes": 0,
@@ -269,13 +319,7 @@ def today_attendance(
             })
             continue
 
-        office = None
-
-        if session.office_id:
-            office = db.get(
-                Office,
-                session.office_id
-            )
+        office = offices_by_id.get(session.office_id) if session.office_id else None
 
         timezone_name = (
             office.timezone
@@ -426,16 +470,19 @@ def today_attendance(
             ).isoformat()
 
         out.append({
+            "session_id": session.id,
             "employee_id": e.id,
             "employee_name": e.full_name,
             "employee_code": e.employee_code,
             "state": session.state,
             "mode": session.mode,
+            "break_minutes_raw": round((session.total_break_seconds or 0) / 60, 1),
             "office": (
                 office.name
                 if office
                 else None
             ),
+            "office_timezone": timezone_name,
             "punch_in_at": (
                 session.punch_in_at.isoformat()
                 if session.punch_in_at
@@ -457,6 +504,123 @@ def today_attendance(
         })
 
     return out
+@router.put("/attendance/{session_id}")
+def edit_attendance_session(
+    session_id: uuid.UUID,
+    data: AttendanceEditIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    u=Depends(require_permission(Permission.MANAGE_EXCEPTIONS)),
+):
+    session = db.get(AttendanceSession, session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Attendance session not found")
+
+    employee = db.get(Employee, session.employee_id)
+
+    if not employee or employee.primary_manager_id != u.id:
+        raise HTTPException(status_code=403, detail="Outside management scope")
+
+    if data.punch_in_at is None and data.punch_out_at is None and data.state is None and data.break_minutes is None:
+        raise HTTPException(status_code=422, detail="No changes supplied")
+
+    if data.punch_in_at and data.punch_out_at and data.punch_out_at <= data.punch_in_at:
+        raise HTTPException(status_code=422, detail="Punch-out must be after punch-in")
+
+    old_value = {
+        "punch_in_at": session.punch_in_at.isoformat() if session.punch_in_at else None,
+        "punch_out_at": session.punch_out_at.isoformat() if session.punch_out_at else None,
+        "state": session.state,
+        "total_break_seconds": session.total_break_seconds,
+    }
+
+    if data.punch_in_at is not None:
+        session.punch_in_at = data.punch_in_at
+    if data.punch_out_at is not None:
+        session.punch_out_at = data.punch_out_at
+    if data.state is not None:
+        session.state = data.state
+    if data.break_minutes is not None:
+        session.total_break_seconds = int(data.break_minutes * 60)
+
+    new_value = {
+        "punch_in_at": session.punch_in_at.isoformat() if session.punch_in_at else None,
+        "punch_out_at": session.punch_out_at.isoformat() if session.punch_out_at else None,
+        "state": session.state,
+        "total_break_seconds": session.total_break_seconds,
+    }
+
+    adjustment = AttendanceAdjustment(
+        attendance_session_id=session.id,
+        old_value=old_value,
+        new_value=new_value,
+        reason=data.reason,
+        adjusted_by=u.id,
+    )
+    db.add(adjustment)
+
+    audit(
+        db,
+        actor=u,
+        action="MANAGER_EDIT_ATTENDANCE",
+        entity_type="attendance_session",
+        entity_id=session.id,
+        old=old_value,
+        new=new_value,
+        request=request,
+    )
+
+    db.commit()
+    db.refresh(session)
+
+    return {
+        "id": session.id,
+        "employee_id": session.employee_id,
+        "work_date": session.work_date,
+        "state": session.state,
+        "punch_in_at": session.punch_in_at.isoformat() if session.punch_in_at else None,
+        "punch_out_at": session.punch_out_at.isoformat() if session.punch_out_at else None,
+        "total_break_seconds": session.total_break_seconds,
+        "reason": data.reason,
+    }
+
+
+@router.get("/attendance/{session_id}/history")
+def attendance_edit_history(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    u=Depends(require_permission(Permission.MANAGE_EXCEPTIONS)),
+):
+    session = db.get(AttendanceSession, session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Attendance session not found")
+
+    employee = db.get(Employee, session.employee_id)
+
+    if not employee or employee.primary_manager_id != u.id:
+        raise HTTPException(status_code=403, detail="Outside management scope")
+
+    rows = db.scalars(
+        select(AttendanceAdjustment)
+        .where(AttendanceAdjustment.attendance_session_id == session_id)
+        .order_by(AttendanceAdjustment.created_at.desc())
+    ).all()
+
+    return [
+        {
+            "id": r.id,
+            "old_value": r.old_value,
+            "new_value": r.new_value,
+            "reason": r.reason,
+            "adjusted_by": r.adjusted_by,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/attendance/weekly")
 def weekly_attendance(
     db: Session = Depends(get_db),
@@ -568,6 +732,211 @@ def weekly_attendance(
         })
 
     return out
+@router.get("/attendance/monthly")
+def monthly_attendance(
+    year: int,
+    month: int,
+    employee_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    u=Depends(
+        require_permission(
+            Permission.VIEW_TEAM_EMPLOYEES
+        )
+    )
+):
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=422, detail="Invalid month")
+
+    current_year = datetime.now(timezone.utc).year
+    if year < 2000 or year > current_year + 1:
+        raise HTTPException(status_code=422, detail="Invalid year")
+
+    team_query = select(Employee).where(
+        Employee.primary_manager_id == u.id
+    )
+
+    if employee_id is not None:
+        team_query = team_query.where(Employee.id == employee_id)
+
+    team = db.scalars(team_query).all()
+
+    if employee_id is not None and not team:
+        raise HTTPException(status_code=403, detail="Outside management scope")
+
+    if not team:
+        return []
+
+    start_date = date(year, month, 1)
+    end_date = (
+        date(year + 1, 1, 1)
+        if month == 12
+        else date(year, month + 1, 1)
+    ) - timedelta(days=1)
+
+    team_ids = [e.id for e in team]
+
+    # --- Batch 1: all sessions for the whole team in one query ---
+    all_sessions = db.scalars(
+        select(AttendanceSession).where(
+            AttendanceSession.employee_id.in_(team_ids),
+            AttendanceSession.work_date >= start_date,
+            AttendanceSession.work_date <= end_date,
+        )
+    ).all()
+
+    session_ids = [s.id for s in all_sessions]
+
+    # --- Batch 2: all LATE_PUNCH_IN exceptions for those sessions, one query ---
+    exceptions_by_session: dict = {}
+    if session_ids:
+        exc_rows = db.scalars(
+            select(AttendanceException)
+            .where(
+                AttendanceException.attendance_session_id.in_(session_ids),
+                AttendanceException.exception_type == "LATE_PUNCH_IN",
+            )
+            .order_by(AttendanceException.id.desc())
+        ).all()
+        # first row per session wins (id desc => most recent kept)
+        for exc in exc_rows:
+            exceptions_by_session.setdefault(exc.attendance_session_id, exc)
+
+    # --- Batch 3: all adjustments for those sessions, one query ---
+    edited_session_ids: set = set()
+    if session_ids:
+        adj_rows = db.scalars(
+            select(AttendanceAdjustment.attendance_session_id)
+            .where(AttendanceAdjustment.attendance_session_id.in_(session_ids))
+            .distinct()
+        ).all()
+        edited_session_ids = set(adj_rows)
+
+    # --- Batch 4: offices for all sessions that have one, resolved once ---
+    office_ids = {s.office_id for s in all_sessions if s.office_id}
+    offices_by_id: dict = {}
+    if office_ids:
+        for o in db.scalars(select(Office).where(Office.id.in_(office_ids))).all():
+            offices_by_id[o.id] = o
+
+    def resolve_tz(office_id):
+        office = offices_by_id.get(office_id) if office_id else None
+        tz_name = office.timezone if office else "UTC"
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            return ZoneInfo("UTC")
+
+    sessions_by_employee: dict = {}
+    for s in all_sessions:
+        sessions_by_employee.setdefault(s.employee_id, {})[s.work_date] = s
+
+    now_utc = datetime.now(timezone.utc)
+    out = []
+
+    for e in team:
+        sessions_by_date = sessions_by_employee.get(e.id, {})
+
+        days = []
+        present_days = 0
+        late_days = 0
+        total_worked_minutes = 0
+        total_late_minutes = 0
+        total_edited = 0
+
+        d = start_date
+        while d <= end_date:
+            session = sessions_by_date.get(d)
+
+            if session is None:
+                days.append({
+                    "date": d.isoformat(),
+                    "session_id": None,
+                    "state": "NOT_STARTED",
+                    "punch_in_at": None,
+                    "punch_out_at": None,
+                    "break_minutes": 0,
+                    "worked_minutes": 0,
+                    "late_minutes": 0,
+                    "was_edited": False,
+                    "office_timezone": None,
+                })
+                d += timedelta(days=1)
+                continue
+
+            # Resolve "is this day still in progress" using the *office's*
+            # local timezone (same rule today_attendance uses), not a bare
+            # UTC date comparison - a session's work_date is assigned in
+            # office-local time, so open sessions must be judged the same way.
+            local_tz = resolve_tz(session.office_id)
+            today_local = datetime.now(local_tz).date()
+
+            punch_in = session.punch_in_at
+            end_time = session.punch_out_at
+            if end_time is None and d == today_local:
+                end_time = now_utc
+
+            worked_minutes = 0
+
+            if punch_in and end_time:
+                if punch_in.tzinfo is None:
+                    punch_in = punch_in.replace(tzinfo=timezone.utc)
+                if end_time.tzinfo is None:
+                    end_time = end_time.replace(tzinfo=timezone.utc)
+
+                break_seconds = session.total_break_seconds or 0
+                worked_seconds = max(
+                    0,
+                    int((end_time - punch_in).total_seconds()) - break_seconds
+                )
+                worked_minutes = round(worked_seconds / 60)
+
+            late_exception = exceptions_by_session.get(session.id)
+            late_minutes = (late_exception.difference_minutes if late_exception else 0) or 0
+
+            was_edited = session.id in edited_session_ids
+
+            if session.punch_in_at:
+                present_days += 1
+            if late_minutes > 0:
+                late_days += 1
+            if was_edited:
+                total_edited += 1
+
+            total_worked_minutes += worked_minutes
+            total_late_minutes += late_minutes
+
+            days.append({
+                "date": d.isoformat(),
+                "session_id": session.id,
+                "state": session.state,
+                "punch_in_at": session.punch_in_at.isoformat() if session.punch_in_at else None,
+                "punch_out_at": session.punch_out_at.isoformat() if session.punch_out_at else None,
+                "break_minutes": round((session.total_break_seconds or 0) / 60),
+                "worked_minutes": worked_minutes,
+                "late_minutes": late_minutes,
+                "was_edited": was_edited,
+                "office_timezone": local_tz.key,
+            })
+
+            d += timedelta(days=1)
+
+        out.append({
+            "employee_id": e.id,
+            "employee_name": e.full_name,
+            "employee_code": e.employee_code,
+            "year": year,
+            "month": month,
+            "present_days": present_days,
+            "late_days": late_days,
+            "edited_days": total_edited,
+            "total_worked_minutes": total_worked_minutes,
+            "total_late_minutes": total_late_minutes,
+            "days": days,
+        })
+
+    return out
+
+
 @router.get("/dashboard")
 def dashboard(db:Session=Depends(get_db),u=Depends(require_permission(Permission.VIEW_TEAM_EMPLOYEES))):
     team=db.scalars(select(Employee).where(Employee.primary_manager_id==u.id)).all()
