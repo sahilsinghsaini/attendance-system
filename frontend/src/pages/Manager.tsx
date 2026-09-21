@@ -752,7 +752,7 @@ const totalTeam = Math.max(
                     </td>
 
                     <td>
-                      {employee.worked_minutes || 0} min
+                      {Math.floor((employee.worked_minutes || 0) / 60)}h {String((employee.worked_minutes || 0) % 60).padStart(2, '0')}m
                     </td>
 
                     <td>
