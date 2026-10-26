@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Outlet } from 'react-router-dom';
-import { LogOut } from 'lucide-react';
+import { NavLink, Outlet } from 'react-router-dom';
+import { LogOut, Briefcase, CalendarDays, CalendarCheck } from 'lucide-react';
 
 export default function ManagerLayout() {
   const [showLogoutModal, setShowLogoutModal] = useState(false);
@@ -26,10 +26,24 @@ export default function ManagerLayout() {
         color: '#8b95a8',
         fontSize: 12,
         padding: '0 12px',
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
       }}
     >
       Team console
     </span>
+    <NavLink to="/manager" end className={({ isActive }) => isActive ? 'active' : ''}>
+      <Briefcase size={18} />
+      <span>Team Console</span>
+    </NavLink>
+    <NavLink to="/manager/calendar" className={({ isActive }) => isActive ? 'active' : ''}>
+      <CalendarDays size={18} />
+      <span>Holidays &amp; Calendar</span>
+    </NavLink>
+    <NavLink to="/manager/leave" className={({ isActive }) => isActive ? 'active' : ''}>
+      <CalendarCheck size={18} />
+      <span>Leave Management</span>
+    </NavLink>
   </nav>
 
   <button
@@ -54,6 +68,7 @@ export default function ManagerLayout() {
       {/* Logout Confirmation Modal */}
       {showLogoutModal && (
         <div
+          className="logout-modal-overlay"
           style={{
             position: 'fixed',
             inset: 0,
@@ -65,6 +80,7 @@ export default function ManagerLayout() {
           }}
         >
           <div
+            className="logout-modal-panel"
             style={{
               background: '#fff',
               borderRadius: 12,

@@ -12,3 +12,6 @@ slowapi==0.1.9
 python-multipart==0.0.20
 pytest==8.4.1
 httpx==0.28.1
+google-auth==2.58.0
+
+requests==2.32.5

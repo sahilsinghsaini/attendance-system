@@ -6,9 +6,7 @@ from sqlalchemy import create_engine, MetaData, Table, select
 
 
 SQLITE_URL = "sqlite:///./attendance.db"
-POSTGRES_URL = "postgresql+psycopg://attendance:attendance@localhost:5432/attendance"
-
-
+POSTGRES_URL = "postgresql+psycopg://attendance:tobatax%401234@127.0.0.1:5433/attendance"
 sqlite_engine = create_engine(SQLITE_URL)
 postgres_engine = create_engine(POSTGRES_URL)
 

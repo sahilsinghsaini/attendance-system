@@ -1,15 +1,11 @@
-const API =
-  import.meta.env.VITE_API_URL ||
-  'http://localhost:8000/api/v1';
+const API = import.meta.env.DEV
+  ? '/api/v1'
+  : (import.meta.env.VITE_API_URL || 'https://api.tobacentral.com/api/v1');
 
 function getHeaders(options: RequestInit, token?: string) {
   return {
     'Content-Type': 'application/json',
-    ...(token
-      ? {
-          Authorization: `Bearer ${token}`,
-        }
-      : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers || {}),
   };
 }
@@ -35,7 +31,6 @@ async function refreshAccessToken() {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     localStorage.removeItem('role');
-
     throw new Error('Refresh token expired');
   }
 
@@ -47,10 +42,7 @@ async function refreshAccessToken() {
   return data.access_token;
 }
 
-export async function api(
-  path: string,
-  options: RequestInit = {}
-) {
+export async function api(path: string, options: RequestInit = {}) {
   let token = localStorage.getItem('access_token');
 
   let response = await fetch(API + path, {
@@ -58,10 +50,6 @@ export async function api(
     headers: getHeaders(options, token || undefined),
   });
 
-  /*
-   * If the access token expired, refresh it once
-   * and retry the original request.
-   */
   if (
     response.status === 401 &&
     !path.startsWith('/auth/refresh') &&
@@ -72,7 +60,7 @@ export async function api(
 
       response = await fetch(API + path, {
         ...options,
-      headers: getHeaders(options, token ?? undefined),
+        headers: getHeaders(options, token || undefined),
       });
     } catch {
       throw new Error('Authentication expired. Please sign in again.');
@@ -83,7 +71,5 @@ export async function api(
     throw new Error(await response.text());
   }
 
-  return response.status === 204
-    ? null
-    : response.json();
+  return response.status === 204 ? null : response.json();
 }

@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
+from typing import Literal
 from uuid import UUID
 from datetime import date, time
 class RegisterIn(BaseModel):
@@ -9,6 +10,13 @@ class UserOut(BaseModel):
     id:UUID; email:EmailStr; role:str; status:str; email_verified:bool
     model_config={"from_attributes":True}
 class WFHCreate(BaseModel): start_date:date; end_date:date; reason:str=Field(min_length=1,max_length=2000)
+class LeaveCreate(BaseModel):
+    start_date: date
+    end_date: date
+    leave_type: Literal["PAID", "FESTIVAL", "UNPAID"] = "PAID"
+    reason: str = Field(min_length=1, max_length=2000)
+class AdminLeaveCreate(LeaveCreate):
+    target_user_id: UUID
 class ReviewIn(BaseModel): comment:str|None=None
 class ManagerCreate(BaseModel): full_name:str; email:EmailStr; password:str=Field(min_length=12)
 class EmployeeCreate(BaseModel): full_name:str; email:EmailStr; password:str=Field(min_length=12); department:str

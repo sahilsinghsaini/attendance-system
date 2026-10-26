@@ -1,9 +1,20 @@
 import { useState } from 'react';
-import { Link, Outlet } from 'react-router-dom';
-import { Clock3, LogOut } from 'lucide-react';
+import { NavLink, Outlet } from 'react-router-dom';
+import {
+  Clock3,
+  LogOut,
+  CalendarDays,
+  CalendarCheck,
+  LayoutDashboard,
+  Laptop,
+  User,
+  Shield,
+  Briefcase
+} from 'lucide-react';
 
 export default function AppLayout() {
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const role = localStorage.getItem('role');
 
   const handleLogout = () => {
     localStorage.clear();
@@ -18,10 +29,42 @@ export default function AppLayout() {
     </h1>
 
         <nav>
-          <Link to="/employee/dashboard">Dashboard</Link>
-          <Link to="/employee/attendance">Attendance</Link>
-          <Link to="/employee/wfh">Work From Home</Link>
-          <Link to="/employee/profile">Profile</Link>
+          {role === 'SUPER_ADMIN' && (
+            <NavLink to="/admin" className={({ isActive }) => isActive ? 'active' : ''}>
+              <Shield size={18} />
+              <span>Admin Console</span>
+            </NavLink>
+          )}
+          {role === 'MANAGER' && (
+            <NavLink to="/manager" className={({ isActive }) => isActive ? 'active' : ''}>
+              <Briefcase size={18} />
+              <span>Manager Console</span>
+            </NavLink>
+          )}
+          <NavLink to="/employee/dashboard" className={({ isActive }) => isActive ? 'active' : ''}>
+            <LayoutDashboard size={18} />
+            <span>Dashboard</span>
+          </NavLink>
+          <NavLink to="/employee/attendance" className={({ isActive }) => isActive ? 'active' : ''}>
+            <Clock3 size={18} />
+            <span>Attendance</span>
+          </NavLink>
+          <NavLink to="/employee/wfh" className={({ isActive }) => isActive ? 'active' : ''}>
+            <Laptop size={18} />
+            <span>Work From Home</span>
+          </NavLink>
+          <NavLink to="/employee/calendar" className={({ isActive }) => isActive ? 'active' : ''}>
+            <CalendarDays size={18} />
+            <span>Holidays & Calendar</span>
+          </NavLink>
+          <NavLink to="/employee/leave" className={({ isActive }) => isActive ? 'active' : ''}>
+            <CalendarCheck size={18} />
+            <span>Leave Requests</span>
+          </NavLink>
+          <NavLink to="/employee/profile" className={({ isActive }) => isActive ? 'active' : ''}>
+            <User size={18} />
+            <span>Profile</span>
+          </NavLink>
         </nav>
 
         <button
@@ -38,6 +81,7 @@ export default function AppLayout() {
 
       {showLogoutModal && (
         <div
+          className="logout-modal-overlay"
           style={{
             position: 'fixed',
             inset: 0,
@@ -49,6 +93,7 @@ export default function AppLayout() {
           }}
         >
           <div
+            className="logout-modal-panel"
             style={{
               background: '#fff',
               borderRadius: 12,

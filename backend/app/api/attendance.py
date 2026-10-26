@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from datetime import datetime, timezone, timedelta
@@ -166,66 +166,129 @@ def today(
         return None
 
     # ---------------------------------------------------------
-    # FIND THE MOST RECENT ATTENDANCE SESSION
-    # ---------------------------------------------------------
-    session = db.scalar(
-        select(AttendanceSession)
-        .where(
-            AttendanceSession.employee_id == e.id
-        )
-        .order_by(
-            AttendanceSession.work_date.desc()
-        )
-    )
-
-    if not session:
-        return None
-
-    # ---------------------------------------------------------
-    # USE THE OFFICE ATTACHED TO THIS ATTENDANCE SESSION
+    # DETERMINE EMPLOYEE OFFICE / TIMEZONE
     # ---------------------------------------------------------
     office = None
 
-    if session.office_id:
+    # Prefer an assigned office for the employee.
+    employee_office = db.scalar(
+        select(EmployeeOffice)
+        .where(
+            EmployeeOffice.employee_id == e.id
+        )
+        .limit(1)
+    )
+
+    if employee_office:
         office = db.get(
             Office,
-            session.office_id
+            employee_office.office_id
         )
 
-    # ---------------------------------------------------------
-    # DETERMINE LOCAL DATE
-    # ---------------------------------------------------------
+    # Fall back to the employee's schedule timezone.
+    timezone_name = "UTC"
+
     if office:
         timezone_name = office.timezone
-    else:
-        timezone_name = "UTC"
 
-        if e.schedule_id:
-            schedule_for_timezone = db.get(
-                WorkSchedule,
-                e.schedule_id
-            )
+    elif e.schedule_id:
+        schedule_for_timezone = db.get(
+            WorkSchedule,
+            e.schedule_id
+        )
 
-            if schedule_for_timezone:
-                timezone_name = (
-                    schedule_for_timezone.timezone
-                )
+        if schedule_for_timezone:
+            timezone_name = schedule_for_timezone.timezone
 
     try:
-        attendance_tz = ZoneInfo(
-            timezone_name
-        )
+        attendance_tz = ZoneInfo(timezone_name)
     except Exception:
         attendance_tz = ZoneInfo("UTC")
         timezone_name = "UTC"
 
+    # ---------------------------------------------------------
+    # TODAY = LOCAL OFFICE DATE
+    # ---------------------------------------------------------
     local_now = datetime.now(
         timezone.utc
     ).astimezone(
         attendance_tz
     )
 
+    today_date = local_now.date()
 
+    # ---------------------------------------------------------
+    # FIND ONLY TODAY'S ATTENDANCE SESSION
+    # ---------------------------------------------------------
+    session = db.scalar(
+        select(AttendanceSession)
+        .where(
+            AttendanceSession.employee_id == e.id,
+            AttendanceSession.work_date == today_date
+        )
+        .order_by(
+            AttendanceSession.punch_in_at.desc()
+        )
+    )
+
+    # ---------------------------------------------------------
+    # NO SESSION TODAY
+    #
+    # This is important:
+    # Do NOT return yesterday's session.
+    # Employee must see Punch In.
+    # ---------------------------------------------------------
+    if not session:
+        return {
+            "id": None,
+            "employee_id": e.id,
+            "work_date": today_date,
+
+            "mode": None,
+            "office_id": (
+                office.id
+                if office
+                else None
+            ),
+
+            "approved_wfh_request_id": None,
+
+            "state": "NOT_STARTED",
+
+            "punch_in_at": None,
+            "punch_out_at": None,
+
+            "total_break_seconds": 0,
+            "active_break_start_at": None,
+
+            "punch_status": "On Time",
+            "late_minutes": 0,
+
+            "scheduled_start_at": None,
+            "scheduled_end_at": None,
+            "adjusted_scheduled_end_at": None
+        }
+
+    # ---------------------------------------------------------
+    # USE SESSION OFFICE IF AVAILABLE
+    # ---------------------------------------------------------
+    session_office = None
+
+    if session.office_id:
+        session_office = db.get(
+            Office,
+            session.office_id
+        )
+
+    if session_office:
+        office = session_office
+        timezone_name = session_office.timezone
+
+        try:
+            attendance_tz = ZoneInfo(timezone_name)
+        except Exception:
+            attendance_tz = ZoneInfo("UTC")
+            timezone_name = "UTC"
 
     # ---------------------------------------------------------
     # ACTIVE BREAK
@@ -321,7 +384,7 @@ def today(
             adjusted_scheduled_end_at = None
 
     # ---------------------------------------------------------
-    # RETURN ATTENDANCE DETAILS
+    # RETURN TODAY'S ATTENDANCE
     # ---------------------------------------------------------
     return {
         "id": session.id,
@@ -330,6 +393,7 @@ def today(
 
         "mode": session.mode,
         "office_id": session.office_id,
+
         "approved_wfh_request_id": (
             session.approved_wfh_request_id
         ),

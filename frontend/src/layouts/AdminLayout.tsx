@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Outlet } from 'react-router-dom';
-import { LogOut } from 'lucide-react';
+import { NavLink, Outlet } from 'react-router-dom';
+import { LogOut, Shield, CalendarDays, CalendarCheck } from 'lucide-react';
 
 export default function AdminLayout() {
   const [showLogoutModal, setShowLogoutModal] = useState(false);
@@ -26,10 +26,24 @@ export default function AdminLayout() {
               color: '#8b95a8',
               fontSize: 12,
               padding: '0 12px',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
             }}
           >
             Super Admin console
           </span>
+          <NavLink to="/admin" end className={({ isActive }) => isActive ? 'active' : ''}>
+            <Shield size={18} />
+            <span>Console Overview</span>
+          </NavLink>
+          <NavLink to="/admin/calendar" className={({ isActive }) => isActive ? 'active' : ''}>
+            <CalendarDays size={18} />
+            <span>Holidays &amp; Calendar</span>
+          </NavLink>
+          <NavLink to="/admin/leave" className={({ isActive }) => isActive ? 'active' : ''}>
+            <CalendarCheck size={18} />
+            <span>Leave Management</span>
+          </NavLink>
         </nav>
 
         <button
@@ -54,6 +68,7 @@ export default function AdminLayout() {
       {/* Logout Confirmation Modal */}
       {showLogoutModal && (
         <div
+          className="logout-modal-overlay"
           style={{
             position: 'fixed',
             inset: 0,
@@ -65,6 +80,7 @@ export default function AdminLayout() {
           }}
         >
           <div
+            className="logout-modal-panel"
             style={{
               background: '#fff',
               borderRadius: 12,

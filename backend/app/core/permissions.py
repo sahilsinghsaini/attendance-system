@@ -14,11 +14,33 @@ class Permission(str, Enum):
     VIEW_TEAM_EMPLOYEES="VIEW_TEAM_EMPLOYEES"
     MANAGE_WORK_HOURS="MANAGE_WORK_HOURS"; VIEW_OWN_WORK_HOURS="VIEW_OWN_WORK_HOURS"
     MANAGE_SCHEDULES="MANAGE_SCHEDULES"; VIEW_OWN_SCHEDULE="VIEW_OWN_SCHEDULE"
+    REQUEST_LEAVE="REQUEST_LEAVE"; VIEW_OWN_LEAVE="VIEW_OWN_LEAVE"; MANAGE_LEAVE="MANAGE_LEAVE"
 
 ROLE_PERMISSIONS = {
     UserRole.SUPER_ADMIN: set(Permission),
-    UserRole.MANAGER: {Permission.PUNCH_ATTENDANCE,Permission.VIEW_OWN_ATTENDANCE,Permission.VIEW_OWN_WORK_HOURS,Permission.VIEW_TEAM_ATTENDANCE,Permission.MANAGE_WFH,Permission.MANAGE_EXCEPTIONS,Permission.VIEW_TEAM_EMPLOYEES,Permission.MANAGE_WORK_HOURS},
-    UserRole.EMPLOYEE: {Permission.PUNCH_ATTENDANCE,Permission.REQUEST_WFH,Permission.VIEW_OWN_ATTENDANCE,Permission.VIEW_OWN_WFH,Permission.VIEW_OWN_WORK_HOURS,Permission.VIEW_OWN_SCHEDULE},
+    UserRole.MANAGER: {
+        Permission.PUNCH_ATTENDANCE,
+        Permission.VIEW_OWN_ATTENDANCE,
+        Permission.VIEW_OWN_WORK_HOURS,
+        Permission.VIEW_TEAM_ATTENDANCE,
+        Permission.MANAGE_WFH,
+        Permission.MANAGE_EXCEPTIONS,
+        Permission.VIEW_TEAM_EMPLOYEES,
+        Permission.MANAGE_WORK_HOURS,
+        Permission.MANAGE_LEAVE,
+        Permission.REQUEST_LEAVE,
+        Permission.VIEW_OWN_LEAVE,
+    },
+    UserRole.EMPLOYEE: {
+        Permission.PUNCH_ATTENDANCE,
+        Permission.REQUEST_WFH,
+        Permission.VIEW_OWN_ATTENDANCE,
+        Permission.VIEW_OWN_WFH,
+        Permission.VIEW_OWN_WORK_HOURS,
+        Permission.VIEW_OWN_SCHEDULE,
+        Permission.REQUEST_LEAVE,
+        Permission.VIEW_OWN_LEAVE,
+    },
 }
 def require_permission(permission: Permission):
     def dep(user: User = Depends(get_current_user)):

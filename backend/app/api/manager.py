@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.core.permissions import require_permission,Permission  
 from app.models.employee import Employee
 from app.models.wfh import WFHRequest
+from app.models.leave import LeaveRequest
 from app.models.user import UserStatus
 from app.schemas.common import ReviewIn,WorkHoursSet
 from pydantic import BaseModel, Field, field_validator
@@ -86,6 +87,7 @@ def employees(
             Employee.status == "ACTIVE"
         )
     ).all()
+
 
     out = []
 
@@ -245,59 +247,145 @@ def today_attendance(
     )
 ):
     team = db.scalars(
-        select(Employee)
-        .where(
+        select(Employee).where(
             Employee.primary_manager_id == u.id
         )
     ).all()
 
-    now = datetime.now(timezone.utc)
-    out = []
+    schedule_ids = {
+        e.schedule_id
+        for e in team
+        if e.schedule_id
+    }
 
-    # A manager's browser timezone must never determine which attendance
-    # record is considered "today".  Candidate sessions are selected by the
-    # employee's office-local calendar date instead.
-    team_ids = [e.id for e in team]
+    schedules = {}
+
+    if schedule_ids:
+        rows = db.scalars(
+            select(WorkSchedule).where(
+                WorkSchedule.id.in_(schedule_ids)
+            )
+        ).all()
+
+        for s in rows:
+            schedules[s.id] = s
+
+
+    now = datetime.now(timezone.utc)
+
+    team_ids = [
+        e.id for e in team
+    ]
+
+
     candidate_sessions = []
+
     if team_ids:
-        utc_today = now.date()
+
+        utc_today = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).date()
+
+
         candidate_sessions = db.scalars(
             select(AttendanceSession)
             .where(
                 AttendanceSession.employee_id.in_(team_ids),
                 AttendanceSession.work_date >= utc_today - timedelta(days=1),
-                AttendanceSession.work_date <= utc_today + timedelta(days=1),
-            )
-            .order_by(
-                AttendanceSession.employee_id,
-                AttendanceSession.work_date.desc(),
-                AttendanceSession.id.desc(),
+                AttendanceSession.work_date <= utc_today + timedelta(days=1)
             )
         ).all()
 
-    office_ids = {s.office_id for s in candidate_sessions if s.office_id}
+
+    office_ids = {
+        s.office_id
+        for s in candidate_sessions
+        if s.office_id
+    }
+
+
     offices_by_id = {}
+
     if office_ids:
-        for o in db.scalars(
-            select(Office).where(Office.id.in_(office_ids))
-        ).all():
+
+        offices = db.scalars(
+            select(Office)
+            .where(
+                Office.id.in_(office_ids)
+            )
+        ).all()
+
+        for o in offices:
             offices_by_id[o.id] = o
 
+
+
     sessions_today = {}
+
+
     for candidate in candidate_sessions:
-        office = offices_by_id.get(candidate.office_id) if candidate.office_id else None
+
+        office = (
+            offices_by_id.get(candidate.office_id)
+            if candidate.office_id
+            else None
+        )
+
+
         try:
-            local_tz = ZoneInfo(office.timezone if office else "UTC")
+            tz = ZoneInfo(
+                office.timezone
+                if office
+                else "UTC"
+            )
+
         except Exception:
-            local_tz = ZoneInfo("UTC")
-        if candidate.work_date == now.astimezone(local_tz).date():
-            sessions_today.setdefault(candidate.employee_id, candidate)
+            tz = ZoneInfo("UTC")
+
+
+        local_date = now.astimezone(tz).date()
+
+
+        is_today = candidate.work_date == local_date
+        is_active_carryover = (
+            candidate.work_date == local_date - timedelta(days=1)
+            and candidate.punch_out_at is None
+            and candidate.state in (AttendanceState.WORKING, AttendanceState.ON_BREAK)
+        )
+
+        if is_today or is_active_carryover:
+
+            existing = sessions_today.get(
+                candidate.employee_id
+            )
+
+            if (
+                existing is None
+                or candidate.id > existing.id
+            ):
+                sessions_today[
+                    candidate.employee_id
+                ] = candidate
+
+
+
+    out = []
+
 
     for e in team:
 
         session = sessions_today.get(e.id)
 
+
+        schedule = (
+            schedules.get(e.schedule_id)
+            if e.schedule_id
+            else None
+        )
+
+
         if not session:
+
             out.append({
                 "session_id": None,
                 "employee_id": e.id,
@@ -313,195 +401,127 @@ def today_attendance(
                 "worked_minutes": 0,
                 "scheduled_start": None,
                 "scheduled_end": None,
-                "punch_status": "Not Started",
+                "punch_status": "NOT_STARTED",
                 "late_minutes": 0,
                 "adjusted_scheduled_end": None
             })
+
             continue
 
-        office = offices_by_id.get(session.office_id) if session.office_id else None
 
-        timezone_name = (
-            office.timezone
-            if office
-            else "UTC"
+
+        office = (
+            offices_by_id.get(session.office_id)
+            if session.office_id
+            else None
         )
 
-        try:
-            local_tz = ZoneInfo(timezone_name)
-        except Exception:
-            local_tz = ZoneInfo("UTC")
-            timezone_name = "UTC"
 
-        break_seconds = (
-            session.total_break_seconds or 0
+        break_minutes = round(
+            (session.total_break_seconds or 0) / 60,
+            1
         )
 
-        active_break = db.scalar(
-            select(AttendanceBreak)
-            .where(
-                AttendanceBreak.attendance_session_id == session.id,
-                AttendanceBreak.end_at.is_(None)
-            )
-            .order_by(
-                AttendanceBreak.start_at.desc()
-            )
-        )
 
-        if active_break:
-            break_start = active_break.start_at
-
-            if break_start.tzinfo is None:
-                break_start = break_start.replace(
-                    tzinfo=timezone.utc
-                )
-
-            break_seconds += int(
-                (
-                    now - break_start
-                ).total_seconds()
-            )
-
-        break_minutes = max(
-            0,
-            round(break_seconds / 60)
-        )
-
-        punch_in = session.punch_in_at
         worked_minutes = 0
 
-        if punch_in:
-            if punch_in.tzinfo is None:
-                punch_in = punch_in.replace(
+
+        if session.punch_in_at:
+
+            start = session.punch_in_at
+            end = session.punch_out_at or now
+
+
+            if start.tzinfo is None:
+                start = start.replace(
                     tzinfo=timezone.utc
                 )
 
-            end_time = (
-                session.punch_out_at
-                if session.punch_out_at
-                else now
-            )
 
-            if end_time.tzinfo is None:
-                end_time = end_time.replace(
+            if end.tzinfo is None:
+                end = end.replace(
                     tzinfo=timezone.utc
                 )
 
-            worked_seconds = max(
-                0,
-                int(
-                    (
-                        end_time - punch_in
-                    ).total_seconds()
-                ) - break_seconds
+
+            seconds = (
+                end - start
+            ).total_seconds()
+
+
+            seconds -= (
+                session.total_break_seconds or 0
             )
+
 
             worked_minutes = round(
-                worked_seconds / 60
+                max(seconds,0) / 60
             )
 
-        schedule = None
 
-        if e.schedule_id:
-            schedule = db.get(
-                WorkSchedule,
-                e.schedule_id
-            )
-
-        scheduled_start = None
-        scheduled_end = None
-        adjusted_scheduled_end = None
-
-        if schedule:
-            scheduled_start_dt = datetime.combine(
-                session.work_date,
-                schedule.start_time,
-                tzinfo=local_tz
-            )
-
-            scheduled_end_dt = datetime.combine(
-                session.work_date,
-                schedule.end_time,
-                tzinfo=local_tz
-            )
-
-            if scheduled_end_dt <= scheduled_start_dt:
-                scheduled_end_dt += timedelta(days=1)
-
-            scheduled_start = scheduled_start_dt.isoformat()
-            scheduled_end = scheduled_end_dt.isoformat()
-
-        late_exception = db.scalar(
-            select(AttendanceException)
-            .where(
-                AttendanceException.attendance_session_id == session.id,
-                AttendanceException.exception_type == "LATE_PUNCH_IN"
-            )
-            .order_by(
-                AttendanceException.id.desc()
-            )
-        )
-
-        late_minutes = (
-            late_exception.difference_minutes
-            if late_exception
-            else 0
-        )
-
-        if late_minutes is None:
-            late_minutes = 0
-
-        punch_status = (
-            "Late"
-            if late_minutes > 0
-            else "On Time"
-        )
-
-        if scheduled_end:
-            scheduled_end_dt = datetime.fromisoformat(
-                scheduled_end
-            )
-
-            adjusted_scheduled_end = (
-                scheduled_end_dt
-                + timedelta(
-                    minutes=late_minutes
-                )
-            ).isoformat()
 
         out.append({
+
             "session_id": session.id,
             "employee_id": e.id,
             "employee_name": e.full_name,
             "employee_code": e.employee_code,
+
             "state": session.state,
             "mode": session.mode,
-            "break_minutes_raw": round((session.total_break_seconds or 0) / 60, 1),
+
             "office": (
                 office.name
                 if office
                 else None
             ),
-            "office_timezone": timezone_name,
+
+            "office_timezone": (
+                office.timezone
+                if office
+                else None
+            ),
+
             "punch_in_at": (
                 session.punch_in_at.isoformat()
                 if session.punch_in_at
                 else None
             ),
+
             "punch_out_at": (
                 session.punch_out_at.isoformat()
                 if session.punch_out_at
                 else None
             ),
+
             "break_minutes": break_minutes,
+
             "worked_minutes": worked_minutes,
-            "scheduled_start": scheduled_start,
-            "scheduled_end": scheduled_end,
-            "punch_status": punch_status,
-            "late_minutes": late_minutes,
-            "adjusted_scheduled_end":
-                adjusted_scheduled_end
+
+            "scheduled_start": (
+                schedule.start_time.strftime("%H:%M")
+                if schedule
+                else None
+            ),
+
+            "scheduled_end": (
+                schedule.end_time.strftime("%H:%M")
+                if schedule
+                else None
+            ),
+
+            "punch_status": (
+                "WORKING"
+                if session.punch_in_at
+                and not session.punch_out_at
+                else "COMPLETED"
+            ),
+
+            "late_minutes": 0,
+
+            "adjusted_scheduled_end": None
         })
+
 
     return out
 @router.put("/attendance/{session_id}")
@@ -952,6 +972,47 @@ def review_wfh(id:uuid.UUID,decision,data:ReviewIn|None=None,db:Session=Depends(
     if not e or e.primary_manager_id!=u.id: raise HTTPException(403,"Outside management scope")
     if decision not in ("approve","reject"): raise HTTPException(422,"Invalid decision")
     r.status="APPROVED" if decision=="approve" else "REJECTED"; r.manager_comment=data.comment if data else None; r.reviewed_by=u.id; db.commit(); return r
+@router.get("/leave")
+def manager_leave(db:Session=Depends(get_db),u=Depends(require_permission(Permission.MANAGE_LEAVE))):
+    query = (
+        select(LeaveRequest, Employee)
+        .join(Employee, Employee.id == LeaveRequest.employee_id)
+        .where(Employee.primary_manager_id == u.id)
+        .order_by(LeaveRequest.created_at.desc())
+    )
+    rows = db.execute(query).all()
+    out = []
+    for r, emp in rows:
+        days = (r.end_date - r.start_date).days + 1
+        out.append({
+            "id": str(r.id),
+            "employee_id": str(emp.id),
+            "employee_name": emp.full_name,
+            "employee_code": emp.employee_code,
+            "department": emp.department,
+            "start_date": r.start_date.isoformat(),
+            "end_date": r.end_date.isoformat(),
+            "leave_type": r.leave_type,
+            "reason": r.reason,
+            "status": r.status,
+            "days": days,
+            "manager_comment": r.manager_comment,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return out
+@router.post("/leave/{id}/{decision}")
+def review_leave(id:uuid.UUID,decision,data:ReviewIn|None=None,db:Session=Depends(get_db),u=Depends(require_permission(Permission.MANAGE_LEAVE))):
+    r=db.get(LeaveRequest,id)
+    if not r: raise HTTPException(404,"Not found")
+    e=db.get(Employee,r.employee_id)
+    if not e or e.primary_manager_id!=u.id: raise HTTPException(403,"Outside management scope")
+    if decision not in ("approve","reject"): raise HTTPException(422,"Invalid decision")
+    r.status="APPROVED" if decision=="approve" else "REJECTED"
+    r.manager_comment=data.comment if data else None
+    r.reviewed_by=u.id
+    r.updated_at=datetime.now(timezone.utc)
+    db.commit()
+    return r
 @router.get("/work-hours")
 def team_work_hours(year:int,month:int,db:Session=Depends(get_db),u=Depends(require_permission(Permission.MANAGE_WORK_HOURS))):
     team=db.scalars(select(Employee).where(Employee.primary_manager_id==u.id)).all()

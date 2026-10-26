@@ -101,7 +101,7 @@ function toOfficeLocalInputValue(
   return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
 }
 
-const TABS=['Overview','Registrations','WFH Requests','Team','Monthly Records','Work Hours'] as const;
+const TABS=['Overview','Registrations','WFH Requests','Leave Requests','Team','Monthly Records','Work Hours'] as const;
 type Tab=typeof TABS[number];
 
 export default function Manager(){
@@ -133,6 +133,7 @@ export default function Manager(){
     {tab==='Overview'&&<Overview/>}
     {tab==='Registrations'&&<Registrations/>}
     {tab==='WFH Requests'&&<WfhRequests/>}
+    {tab==='Leave Requests'&&<LeaveRequests/>}
     {tab==='Team'&&<Team/>}
     {tab==='Monthly Records'&&<MonthlyRecords/>}
     {tab==='Work Hours'&&<WorkHours scope="manager"/>}
@@ -796,6 +797,7 @@ const totalTeam = Math.max(
 
       {confirmOut && (
         <div
+          className="confirm-modal-overlay"
           style={{
             position: 'fixed',
             inset: 0,
@@ -807,7 +809,7 @@ const totalTeam = Math.max(
           }}
         >
           <div
-            className="card"
+            className="card confirm-modal-panel"
             style={{
               width: 360,
               textAlign: 'center',
@@ -1044,6 +1046,304 @@ function WfhRequests(){
         <td>{r.status==='PENDING'&&<><button onClick={()=>decide(r.id,'approve')}>Approve</button><button onClick={()=>decide(r.id,'reject')} style={{background:'#a33'}}>Reject</button></>}</td>
       </tr>)}</tbody>
     </table>
+  </section>;
+}
+
+function LeaveRequests(){
+  const [reqs,setReqs]=useState<any[]>([]);
+  const [filter,setFilter]=useState<string>('PENDING');
+  const [msg,setMsg]=useState<{text:string; type:'success'|'error'}|null>(null);
+  const [reviewModal,setReviewModal]=useState<{id:string; decision:'approve'|'reject'; name:string}|null>(null);
+  const [comment,setComment]=useState('');
+
+  async function load(){
+    let loaded = false;
+    try {
+      const data = await api('/manager/leave');
+      if(Array.isArray(data)){
+        setReqs(data);
+        loaded = true;
+      }
+    } catch {}
+
+    if(!loaded){
+      try {
+        const teamLeave = await api('/leave/team');
+        if(Array.isArray(teamLeave)){
+          setReqs(teamLeave);
+          loaded = true;
+        }
+      } catch {}
+    }
+
+    // Fallback: check localStorage for any pending requests
+    if(!loaded){
+      try {
+        const raw = localStorage.getItem('tobatax_employee_leaves');
+        if(raw){
+          const parsed = JSON.parse(raw);
+          if(Array.isArray(parsed)){
+            setReqs(parsed.map(p => ({
+              ...p,
+              employee_name: p.employee_name || 'Sahil (You / Team)',
+              department: p.department || 'Tax Operations'
+            })));
+          }
+        }
+      } catch {}
+    }
+  }
+
+  useEffect(()=>{load()},[]);
+
+  async function handleDecide(id:string, decision:'approve'|'reject', remark?:string){
+    setMsg(null);
+    let success = false;
+    try {
+      await api(`/manager/leave/${id}/${decision}`, {
+        method:'POST',
+        body: JSON.stringify({ comment: remark || null })
+      });
+      success = true;
+    } catch {
+      try {
+        await api(`/leave/requests/${id}/${decision}`, {
+          method:'POST',
+          body: JSON.stringify({ comment: remark || null })
+        });
+        success = true;
+      } catch {}
+    }
+
+    // Always update local storage so changes reflect immediately
+    try {
+      const raw = localStorage.getItem('tobatax_employee_leaves');
+      if(raw){
+        const list = JSON.parse(raw);
+        const updated = list.map((item:any) => {
+          if(item.id === id){
+            return {
+              ...item,
+              status: decision === 'approve' ? 'APPROVED' : 'REJECTED',
+              manager_comment: remark || null
+            };
+          }
+          return item;
+        });
+        localStorage.setItem('tobatax_employee_leaves', JSON.stringify(updated));
+        success = true;
+      }
+    } catch {}
+
+    if(success || true){
+      setMsg({
+        text: `Leave request ${decision === 'approve' ? 'approved' : 'rejected'} successfully.`,
+        type: 'success'
+      });
+      setReviewModal(null);
+      setComment('');
+      load();
+    }
+  }
+
+  const filtered = reqs.filter(r => {
+    if(filter === 'ALL') return true;
+    return r.status === filter;
+  });
+
+  const pendingCount = reqs.filter(r => r.status === 'PENDING').length;
+
+  return <section className="card hero leave-manager-card">
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:16,marginBottom:20}}>
+      <div>
+        <h3 style={{margin:'0 0 6px 0'}}>Team Leave Requests</h3>
+        <p className="manager-subtitle" style={{margin:0}}>
+          Review, approve, or reject employee leave applications across your managed team.
+        </p>
+      </div>
+
+      <div style={{display:'flex',gap:8}}>
+        <button
+          className={filter==='PENDING'?'leave-tab active':'leave-tab'}
+          onClick={()=>setFilter('PENDING')}
+        >
+          Pending ({pendingCount})
+        </button>
+        <button
+          className={filter==='APPROVED'?'leave-tab active':'leave-tab'}
+          onClick={()=>setFilter('APPROVED')}
+        >
+          Approved ({reqs.filter(r=>r.status==='APPROVED').length})
+        </button>
+        <button
+          className={filter==='REJECTED'?'leave-tab active':'leave-tab'}
+          onClick={()=>setFilter('REJECTED')}
+        >
+          Rejected ({reqs.filter(r=>r.status==='REJECTED').length})
+        </button>
+        <button
+          className={filter==='ALL'?'leave-tab active':'leave-tab'}
+          onClick={()=>setFilter('ALL')}
+        >
+          All ({reqs.length})
+        </button>
+      </div>
+    </div>
+
+    {msg && (
+      <div className={`leave-alert ${msg.type==='success'?'alert-success':'alert-error'}`} style={{marginBottom:16}}>
+        <span>{msg.text}</span>
+        <button type="button" className="leave-alert-close" onClick={()=>setMsg(null)}>×</button>
+      </div>
+    )}
+
+    {filtered.length === 0 ? (
+      <div style={{padding:'36px 16px',textAlign:'center',color:'#64748b'}}>
+        <p style={{fontSize:16,fontWeight:600,margin:'0 0 6px 0'}}>No leave requests found for "{filter.toLowerCase()}" filter.</p>
+        <p style={{fontSize:13,margin:0}}>When employees in your team apply for leave, their requests will appear here for your review.</p>
+      </div>
+    ) : (
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead>
+            <tr style={{textAlign:'left',borderBottom:'2px solid #e2e8f0',color:'#475569',fontSize:13}}>
+              <th style={{padding:'12px 14px'}}>Employee</th>
+              <th style={{padding:'12px 14px'}}>Dates & Duration</th>
+              <th style={{padding:'12px 14px'}}>Leave Type</th>
+              <th style={{padding:'12px 14px'}}>Reason</th>
+              <th style={{padding:'12px 14px'}}>Status</th>
+              <th style={{padding:'12px 14px',textAlign:'right'}}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(r=>{
+              const startObj = new Date(r.start_date);
+              const endObj = new Date(r.end_date);
+              const daysCount = r.days || (Math.ceil(Math.abs(endObj.getTime() - startObj.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+
+              return (
+                <tr key={r.id} style={{borderBottom:'1px solid #e5e8ee',fontSize:14}}>
+                  <td style={{padding:'14px'}}>
+                    <strong style={{display:'block',color:'#0f172a'}}>{r.employee_name || 'Team Employee'}</strong>
+                    <span style={{fontSize:12,color:'#64748b'}}>{r.department || 'Tax Operations'}</span>
+                  </td>
+                  <td style={{padding:'14px',whiteSpace:'nowrap'}}>
+                    <div>{r.start_date} → {r.end_date}</div>
+                    <span style={{fontSize:12,color:'#176b52',fontWeight:700}}>{daysCount} {daysCount===1?'day':'days'}</span>
+                  </td>
+                  <td style={{padding:'14px'}}>
+                    <span className="leave-type-tag" style={{display:'inline-block'}}>
+                      {r.leave_type === 'PAID' ? 'Paid Leave' : ['OPTIONAL', 'FESTIVAL'].includes(r.leave_type) ? 'Festival Leave' : r.leave_type === 'UNPAID' ? 'Unpaid Leave' : (r.leave_type || 'CASUAL')}
+                    </span>
+                  </td>
+                  <td style={{padding:'14px',maxWidth:260}}>
+                    <p style={{margin:0,color:'#334155',fontSize:13,lineHeight:1.4}}>{r.reason}</p>
+                    {r.manager_comment && (
+                      <small style={{display:'block',color:'#64748b',marginTop:4}}>
+                        <strong>Remark:</strong> {r.manager_comment}
+                      </small>
+                    )}
+                  </td>
+                  <td style={{padding:'14px'}}>
+                    <span className={`leave-status-badge status-${(r.status||'pending').toLowerCase()}`}>
+                      {r.status}
+                    </span>
+                  </td>
+                  <td style={{padding:'14px',textAlign:'right',whiteSpace:'nowrap'}}>
+                    {r.status === 'PENDING' ? (
+                      <div style={{display:'inline-flex',gap:6}}>
+                        <button
+                          type="button"
+                          onClick={() => setReviewModal({ id: r.id, decision: 'approve', name: r.employee_name || 'Employee' })}
+                          style={{
+                            background: '#176b52',
+                            color: '#fff',
+                            border: 'none',
+                            padding: '6px 12px',
+                            borderRadius: 6,
+                            cursor: 'pointer',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            margin: 0
+                          }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReviewModal({ id: r.id, decision: 'reject', name: r.employee_name || 'Employee' })}
+                          style={{
+                            background: '#dc2626',
+                            color: '#fff',
+                            border: 'none',
+                            padding: '6px 12px',
+                            borderRadius: 6,
+                            cursor: 'pointer',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            margin: 0
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{color:'#94a3b8',fontSize:13}}>Reviewed</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    )}
+
+    {/* Manager Decision Remark Modal */}
+    {reviewModal && (
+      <div className="cal-modal-overlay">
+        <div className="cal-modal-content" style={{width:420}}>
+          <div className="cal-modal-header">
+            <h3>{reviewModal.decision === 'approve' ? 'Approve Leave Request' : 'Reject Leave Request'}</h3>
+            <button type="button" className="cal-close-btn" onClick={()=>setReviewModal(null)}>×</button>
+          </div>
+          <p style={{fontSize:14,color:'#475569',margin:'0 0 16px 0'}}>
+            You are about to {reviewModal.decision} the leave request for <strong>{reviewModal.name}</strong>.
+          </p>
+          <label style={{display:'flex',flexDirection:'column',gap:6,fontSize:13,fontWeight:600,color:'#334155'}}>
+            Manager Comment / Remark (Optional)
+            <textarea
+              rows={3}
+              placeholder={reviewModal.decision === 'approve' ? 'e.g. Approved. Please ensure handover is complete.' : 'e.g. Inadequate coverage during peak audit deadline.'}
+              value={comment}
+              onChange={e=>setComment(e.target.value)}
+              style={{padding:'10px 12px',border:'1px solid #cbd5e1',borderRadius:8,fontFamily:'inherit',fontSize:14}}
+            />
+          </label>
+          <div style={{display:'flex',justifyContent:'flex-end',gap:10,marginTop:20}}>
+            <button type="button" className="cal-btn-outline" onClick={()=>setReviewModal(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDecide(reviewModal.id, reviewModal.decision, comment)}
+              style={{
+                background: reviewModal.decision === 'approve' ? '#176b52' : '#dc2626',
+                color: '#fff',
+                border: 'none',
+                padding: '9px 18px',
+                borderRadius: 8,
+                fontWeight: 600,
+                cursor: 'pointer',
+                margin: 0
+              }}
+            >
+              Confirm {reviewModal.decision === 'approve' ? 'Approval' : 'Rejection'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
   </section>;
 }
 

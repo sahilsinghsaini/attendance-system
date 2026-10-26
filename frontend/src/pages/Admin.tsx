@@ -491,7 +491,7 @@ function Employees(){
 
       <form onSubmit={createEmployee} className="stack">
         <label>
-          Full name
+          Full Name
           <input
             value={form.full_name}
             onChange={e=>

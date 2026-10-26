@@ -1,0 +1,15 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - VITE_API_URL=https://api.tobacentral.com/api/v1
+      - -t
+      - $_IMAGE
+      - .
+
+images:
+  - $_IMAGE
+
+substitutions:
+  _IMAGE: asia-south2-docker.pkg.dev/tobatax-attendance-system/cloud-run-images/attendance-frontend

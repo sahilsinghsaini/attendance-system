@@ -439,7 +439,8 @@ def punch_out(db, user):
     s = db.scalar(
         select(AttendanceSession)
         .where(
-            AttendanceSession.employee_id == e.id
+            AttendanceSession.employee_id == e.id,
+            AttendanceSession.state == AttendanceState.WORKING
         )
         .order_by(
             AttendanceSession.work_date.desc()

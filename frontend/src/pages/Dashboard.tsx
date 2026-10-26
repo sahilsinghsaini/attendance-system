@@ -1,411 +1,133 @@
-import {useEffect,useState} from 'react';
-import Card from '../components/Card';
-import {api} from '../services/api';
+import { useEffect, useState } from 'react';
+import { ArrowUpRight, CalendarDays, CheckCircle2, Clock3, Coffee, Timer, TrendingUp } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { api } from '../services/api';
 
-export default function Dashboard(){
-  const [s,setS]=useState<any>();
-  const [wh,setWh]=useState<any>();
-  const [history,setHistory]=useState<any[]>([]);
-  const [offices,setOffices]=useState<any[]>([]);
-  const [,setTick]=useState(0);
-  const now=new Date();
+type Session = {
+  id: string;
+  state?: string;
+  work_date?: string;
+  punch_in_at?: string;
+  punch_out_at?: string;
+  office_id?: string;
+  active_break_start_at?: string;
+  total_break_seconds?: number;
+};
 
-  function parseTimestamp(value:any){
-    if(!value) return null;
+export default function Dashboard() {
+  const [session, setSession] = useState<Session>();
+  const [hours, setHours] = useState<any>();
+  const [history, setHistory] = useState<Session[]>([]);
+  const [offices, setOffices] = useState<any[]>([]);
+  const [, setTick] = useState(0);
+  const now = new Date();
 
-    const text=String(value);
+  const parseTimestamp = (value?: string) => {
+    if (!value) return null;
+    const text = String(value);
+    const date = new Date(!text.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(text) ? `${text}Z` : text);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
 
-    if(
-      !text.endsWith('Z') &&
-      !/[+-]\d{2}:\d{2}$/.test(text)
-    ){
-      return new Date(text+'Z');
-    }
+  const breakSeconds = (item?: Session) => {
+    if (!item) return 0;
+    const start = parseTimestamp(item.active_break_start_at);
+    const end = item.punch_out_at ? parseTimestamp(item.punch_out_at) : new Date();
+    const active = start && end ? Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000)) : 0;
+    return (item.total_break_seconds || 0) + active;
+  };
 
-    return new Date(text);
-  }
+  const workedSeconds = (item?: Session) => {
+    const start = parseTimestamp(item?.punch_in_at);
+    const end = item?.punch_out_at ? parseTimestamp(item.punch_out_at) : new Date();
+    return start && end ? Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000) - breakSeconds(item)) : 0;
+  };
 
-  function activeBreakSeconds(session:any){
-    if(!session?.active_break_start_at) return 0;
+  const duration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+  };
 
-    const breakStart=parseTimestamp(session.active_break_start_at);
-    if(!breakStart || Number.isNaN(breakStart.getTime())) return 0;
+  const formatTime = (value?: string, officeId?: string) => {
+    const date = parseTimestamp(value);
+    if (!date) return '—';
+    const timezone = offices.find((office) => office.id === officeId)?.timezone;
+    return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: timezone });
+  };
 
-    const end=session.punch_out_at
-      ? parseTimestamp(session.punch_out_at)
-      : new Date();
+  const formatDate = (value?: string) => {
+    if (!value) return '—';
+    const [year, month, day] = value.split('-').map(Number);
+    if (!year || !month || !day) return value;
+    return new Date(year, month - 1, day).toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  };
 
-    if(!end || Number.isNaN(end.getTime())) return 0;
+  useEffect(() => {
+    api('/attendance/today').then(setSession).catch(() => {});
+    api('/attendance/history').then(setHistory).catch(() => {});
+    api('/offices/my-offices').then(setOffices).catch(() => {});
+    api(`/attendance/work-hours?year=${now.getFullYear()}&month=${now.getMonth() + 1}`).then(setHours).catch(() => {});
+  }, []);
 
-    return Math.max(
-      0,
-      Math.floor((end.getTime()-breakStart.getTime())/1000)
-    );
-  }
+  useEffect(() => {
+    const timer = setInterval(() => setTick((value) => value + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
-  function totalBreakSeconds(session:any){
-    if(!session) return 0;
+  const state = session?.state || 'NOT_STARTED';
+  const statusLabel: Record<string, string> = {
+    WORKING: 'You’re on the clock', ON_BREAK: 'Taking a break', COMPLETED: 'Shift complete', NOT_STARTED: 'Ready when you are',
+  };
+  const progress = hours?.required_hours ? Math.min(100, Math.round((hours.fulfilled_hours / hours.required_hours) * 100)) : 0;
+  const records = history.slice(0, 5);
 
-    return (
-      session.total_break_seconds||0
-    )+activeBreakSeconds(session);
-  }
-
-  function workedTime(session:any){
-    if(!session?.punch_in_at) return '0m';
-
-    const start=parseTimestamp(session.punch_in_at);
-
-    if(!start || Number.isNaN(start.getTime())) return '0m';
-
-    const end=session.punch_out_at
-      ? parseTimestamp(session.punch_out_at)
-      : new Date();
-
-    if(!end || Number.isNaN(end.getTime())) return '0m';
-
-    const breakSeconds=totalBreakSeconds(session);
-
-    const seconds=Math.max(
-      0,
-      Math.floor((end.getTime()-start.getTime())/1000)-breakSeconds
-    );
-
-    const hours=Math.floor(seconds/3600);
-    const minutes=Math.floor((seconds%3600)/60);
-
-    if(hours>0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
-  }
-
-  function breakTime(session:any){
-    const seconds=totalBreakSeconds(session);
-
-    const hours=Math.floor(seconds/3600);
-    const minutes=Math.floor((seconds%3600)/60);
-
-    if(hours>0) return `${hours}h ${minutes}m`;
-    return `${minutes} min`;
-  }
-
-  function formatOfficeTime(value:any,officeId?:string){
-    if(!value) return '—';
-
-    const office=offices.find(o=>o.id===officeId);
-    const timeZone=office?.timezone;
-
-    const date=parseTimestamp(value);
-
-    if(!date || Number.isNaN(date.getTime())) return '—';
-
-    return date.toLocaleTimeString(undefined,{
-      hour:'numeric',
-      minute:'2-digit',
-      timeZone
-    });
-  }
-
-  function formatWorkDate(value:any){
-    if(!value) return '—';
-
-    const parts=String(value).split('-');
-
-    if(parts.length!==3) return String(value);
-
-    const year=Number(parts[0]);
-    const month=Number(parts[1]);
-    const day=Number(parts[2]);
-
-    if(
-      !Number.isInteger(year) ||
-      !Number.isInteger(month) ||
-      !Number.isInteger(day)
-    ){
-      return String(value);
-    }
-
-    const date=new Date(year,month-1,day);
-
-    return date.toLocaleDateString(undefined,{
-      day:'2-digit',
-      month:'short',
-      year:'numeric'
-    });
-  }
-
-  useEffect(()=>{
-    api('/attendance/today').then(setS).catch(()=>{});
-  },[]);
-
-  useEffect(()=>{
-    api('/attendance/history').then(setHistory).catch(()=>{});
-  },[]);
-
-  useEffect(()=>{
-    api('/offices/my-offices').then(setOffices).catch(()=>{});
-  },[]);
-
-  useEffect(()=>{
-    api(
-      `/attendance/work-hours?year=${now.getFullYear()}&month=${now.getMonth()+1}`
-    ).then(setWh).catch(()=>{});
-  },[]);
-
-  useEffect(()=>{
-    const timer=setInterval(()=>{
-      setTick(value=>value+1);
-    },1000);
-
-    return ()=>clearInterval(timer);
-  },[]);
-
-  return <>
-<div
-  className={
-    s?.state === 'ON_BREAK'
-      ? 'dashboard-bg-illustration break-illustration'
-      : 'dashboard-bg-illustration'
-  }
->
-  <img
-    src={
-      s?.state === 'ON_BREAK'
-        ? '/assets/illustrations/coffee-break.png'
-        : '/assets/illustrations/accounting-work.png'
-    }
-    alt=""
-  />
-</div>
+  return <div className="employee-dashboard">
     <header className="dashboard-header">
-  <div>
-    <p className="eyebrow">TOBATAX • EMPLOYEE</p>
-    <h2>Good day 👋</h2>
-    <p className="dashboard-subtitle">
-      Here’s your attendance overview for today.
-    </p>
-  </div>
-
-  <img
-    src="/assets/branding/tobatax-logo.png"
-    alt="Tobatax"
-    className="dashboard-logo"
-  />
-</header>
-
-    <section className="card hero">
-      <h3>This month's required hours</h3>
-
-      {wh
-        ?(
-          wh.required_hours==null
-            ?<p>
-                No hours target has been set for you yet this month.
-              </p>
-            :<div className="grid">
-                <Card
-                  title="Required"
-                  value={`${wh.required_hours}h`}
-                />
-
-                <Card
-                  title="Completed"
-                  value={`${wh.fulfilled_hours}h`}
-                />
-
-                <Card
-                  title="Remaining"
-                  value={`${wh.remaining_hours}h`}
-                />
-
-                <Card
-                  title="On track"
-                  value={wh.met_target?'Yes':'No'}
-                />
-              </div>
-        )
-        :<p>Loading…</p>
-      }
-    </section>
-
-    <section className="card hero">
-      <h3>Attendance History</h3>
-
-          <section className="card hero">
-  <h3>Today's Attendance</h3>
-
-  <div className={`attendance-status ${s?.state?.toLowerCase() || 'not_started'}`}>
-    <div className="attendance-status-icon">
-      {s?.state === 'WORKING' && '🟢'}
-      {s?.state === 'ON_BREAK' && '☕'}
-      {s?.state === 'COMPLETED' && '🔵'}
-      {(!s?.state || s?.state === 'NOT_STARTED') && '⚪'}
-    </div>
-
-    <div className="attendance-status-text">
-      <span>Current status</span>
-
-      <strong>
-        {s?.state === 'WORKING' && 'Working'}
-        {s?.state === 'ON_BREAK' && 'On Break'}
-        {s?.state === 'COMPLETED' && 'Completed'}
-        {(!s?.state || s?.state === 'NOT_STARTED') && 'Not Started'}
-      </strong>
-
-      <div className="attendance-metrics">
-  <div>
-    <span>Worked today</span>
-    <strong>{s ? workedTime(s) : '0m'}</strong>
-  </div>
-
-  <div>
-    <span>Break time</span>
-    <strong>{s ? breakTime(s) : '0 min'}</strong>
-  </div>
-</div>
-
-<p>
-  {s?.state === 'WORKING' && 'You are currently working.'}
-  {s?.state === 'ON_BREAK' && 'Enjoy your break.'}
-  {s?.state === 'COMPLETED' && 'Your attendance for today is complete.'}
-  {(!s?.state || s?.state === 'NOT_STARTED') &&
-    'You have not punched in yet.'}
-</p>
-    </div>
-
-    <button onClick={()=>{window.location.href='/employee/attendance';}}>
-      Open Attendance
-    </button>
-  </div>
-</section>
-      <div style={{
-        overflowX:'auto',
-        marginTop:16
-      }}>
-        <table style={{
-          width:'100%',
-          borderCollapse:'collapse',
-          minWidth:650
-        }}>
-          <thead>
-            <tr>
-              {[
-                'Date',
-                'Punch In',
-                'Punch Out',
-                'Break',
-                'Worked',
-                'Status'
-              ].map(h=>(
-                <th
-                  key={h}
-                  style={{
-                    textAlign:'left',
-                    padding:'12px',
-                    borderBottom:'2px solid #e5e7eb',
-                    fontSize:13
-                  }}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-
-          <tbody>
-            {history.map(item=>{
-              const historySession=
-                s && s.id===item.id
-                  ? {...item,...s}
-                  : item;
-
-              return (
-                <tr key={item.id}>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee'
-                  }}>
-                    {formatWorkDate(item.work_date)}
-                  </td>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee'
-                  }}>
-                    {formatOfficeTime(
-                      item.punch_in_at,
-                      item.office_id
-                    )}
-                  </td>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee'
-                  }}>
-                    {formatOfficeTime(
-                      item.punch_out_at,
-                      item.office_id
-                    )}
-                  </td>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee'
-                  }}>
-                    {breakTime(historySession)}
-                  </td>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee',
-                    fontWeight:600
-                  }}>
-                    {workedTime(historySession)}
-                  </td>
-
-                  <td style={{
-                    padding:'12px',
-                    borderBottom:'1px solid #eee'
-                  }}>
-                    <span style={{
-                      padding:'4px 9px',
-                      borderRadius:12,
-                      fontSize:12,
-                      fontWeight:600,
-                      background:
-                        item.state==='COMPLETED'
-                          ?'#dcfce7'
-                          :'#fef3c7',
-                      color:
-                        item.state==='COMPLETED'
-                          ?'#166534'
-                          :'#92400e'
-                    }}>
-                      {item.state}
-                    </span>
-                  </td>
-
-                </tr>
-              );
-            })}
-
-            {!history.length&&(
-              <tr>
-                <td
-                  colSpan={6}
-                  style={{
-                    padding:24,
-                    textAlign:'center',
-                    color:'#6b7280'
-                  }}
-                >
-                  No attendance records yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div>
+        <p className="eyebrow">TOBATAX <span>•</span> EMPLOYEE WORKSPACE</p>
+        <h2>Good day <span aria-hidden="true">✦</span></h2>
+        <p className="dashboard-subtitle">Here’s your attendance and work-hour progress at a glance.</p>
       </div>
+      <div className="dashboard-date"><CalendarDays size={17} />{now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+    </header>
+
+    <section className={`attendance-hero attendance-hero-${state.toLowerCase()}`}>
+      <div className="attendance-hero-copy">
+        <span className="hero-kicker"><span className="live-dot" /> TODAY’S ATTENDANCE</span>
+        <h3>{statusLabel[state] || state.replace(/_/g, ' ')}</h3>
+        <p>{state === 'WORKING' ? 'Your time is being tracked. Keep up the good work.' : state === 'ON_BREAK' ? 'Your break is in progress. Take the time you need.' : state === 'COMPLETED' ? 'Your attendance for today is complete. Have a great rest of your day.' : 'Start your shift to begin tracking your work hours.'}</p>
+        <div className="hero-actions">
+          <Link className="primary-action" to="/employee/attendance"><Clock3 size={17} /> Open attendance <ArrowUpRight size={16} /></Link>
+          <Link className="secondary-action" to="/employee/attendance">View history</Link>
+        </div>
+      </div>
+      <div className="hero-today-metrics">
+        <div className="today-metric"><span><Timer size={15} /> Worked today</span><strong>{duration(workedSeconds(session))}</strong></div>
+        <div className="today-metric"><span><Coffee size={15} /> Break time</span><strong>{duration(breakSeconds(session))}</strong></div>
+      </div>
+      <div className="hero-orbit hero-orbit-one" /><div className="hero-orbit hero-orbit-two" />
     </section>
-  </>;
+
+    <section className="dashboard-stat-grid" aria-label="Monthly work summary">
+      <article className="dashboard-stat-card"><div className="stat-card-top"><span className="stat-icon stat-icon-green"><Clock3 size={18} /></span><span className="stat-label">Hours completed</span></div><strong>{hours ? `${hours.fulfilled_hours}h` : '—'}</strong><span className="stat-foot"><TrendingUp size={14} /> {hours?.required_hours ? `${progress}% of monthly target` : 'This month'}</span></article>
+      <article className="dashboard-stat-card"><div className="stat-card-top"><span className="stat-icon stat-icon-blue"><Timer size={18} /></span><span className="stat-label">Hours remaining</span></div><strong>{hours?.remaining_hours != null ? `${hours.remaining_hours}h` : '—'}</strong><span className="stat-foot">{hours?.required_hours ? `of ${hours.required_hours}h required` : 'Monthly target'}</span></article>
+      <article className="dashboard-stat-card progress-stat"><div className="stat-card-top"><span className="stat-icon stat-icon-violet"><CheckCircle2 size={18} /></span><span className="stat-label">Monthly progress</span></div><strong>{hours?.required_hours ? `${progress}%` : '—'}</strong><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span className="stat-foot">{hours?.met_target ? 'Monthly target met' : 'Keep your pace steady'}</span></article>
+    </section>
+
+    <section className="dashboard-lower-grid">
+      <article className="dashboard-panel history-panel">
+        <div className="panel-heading"><div><h3>Recent attendance</h3><p>Your latest recorded work days</p></div><Link to="/employee/attendance">See all <ArrowUpRight size={15} /></Link></div>
+        <div className="attendance-table-wrap"><table className="dashboard-table"><thead><tr><th>Date</th><th>Clock in</th><th>Clock out</th><th>Break</th><th>Worked</th><th>Status</th></tr></thead><tbody>
+        {records.map((item) => { const combined = session?.id === item.id ? { ...item, ...session } : item; return <tr key={item.id}><td>{formatDate(item.work_date)}</td><td>{formatTime(item.punch_in_at, item.office_id)}</td><td>{formatTime(item.punch_out_at, item.office_id)}</td><td>{duration(breakSeconds(combined))}</td><td className="worked-cell">{duration(workedSeconds(combined))}</td><td><span className={`table-status status-${item.state?.toLowerCase()}`}>{item.state?.replace(/_/g, ' ') || '—'}</span></td></tr>; })}
+          {!records.length && <tr><td className="table-empty" colSpan={6}>Your attendance records will appear here.</td></tr>}
+        </tbody></table></div>
+      </article>
+      <article className="dashboard-panel target-panel">
+        <div className="panel-heading"><div><h3>This month</h3><p>Your required hours progress</p></div><span className="target-icon"><TrendingUp size={18} /></span></div>
+        {hours?.required_hours ? <><div className="target-value">{hours.fulfilled_hours}<span> / {hours.required_hours}h</span></div><div className="large-progress-track"><span style={{ width: `${progress}%` }} /></div><div className="target-legend"><span><i /> Completed</span><strong>{progress}%</strong></div><p className="target-note">{hours.met_target ? 'You’ve reached your monthly target.' : `${hours.remaining_hours} hours to go. You’ve got this.`}</p></> : <div className="target-empty">{hours ? 'No monthly target has been set for you yet.' : 'Loading your monthly summary…'}</div>}
+        <Link className="panel-link" to="/employee/attendance">Explore attendance <ArrowUpRight size={15} /></Link>
+      </article>
+    </section>
+  </div>;
 }
